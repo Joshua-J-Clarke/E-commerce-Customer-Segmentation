@@ -1,0 +1,168 @@
+/*CTEs and statements ending in r refer to the registered user group and u refers to the unregistered user group*/
+--CTE defining registered user table, necessary as we deal with registered users using their user_crm_id and unregistered users using user_cookie_id
+WITH registered AS
+(
+    SELECT * 
+    FROM prism-2023-c2.Prism_Main.transactions
+    WHERE user_crm_id IS NOT NULL
+)
+--CTE defining unregistered user table, necessary as we deal with registered users using their user_crm_id and unregistered users using user_cookie_id
+, unregistered AS
+(
+    SELECT * 
+    FROM prism-2023-c2.Prism_Main.transactions
+    WHERE user_crm_id IS NULL
+)
+--CTE defining the values used to calculate specific RFM scores for registered users
+, RFM_data_r AS
+(
+    SELECT 
+        user_crm_id AS unique_user,
+        -- recency
+        MAX(DATE_TRUNC(date, QUARTER)) AS latest_purchase_date_quarter,
+        MAX(date) AS latest_purchase_date,
+        --frequency
+        COUNT(DISTINCT(transaction_id)) AS transaction_count,
+        --monetary
+        SUM(transaction_total) AS revenue_total
+    FROM registered
+    GROUP BY user_crm_id
+)
+--CTE defining the values used to calculate specific RFM scores for unregistered users
+, RFM_data_u AS
+(
+    SELECT 
+        user_cookie_id AS unique_user,
+        --recency 
+        MAX(DATE_TRUNC(date, QUARTER)) AS latest_purchase_date_quarter,
+        --frequency
+        MAX(date) AS latest_purchase_date,
+        COUNT(DISTINCT(transaction_id)) AS transaction_count,
+        --monetary
+        SUM(transaction_total) AS revenue_total
+    FROM unregistered
+    GROUP BY user_cookie_id
+)
+--This CTE is where RFM values are assigned based on specific bounds which can be changed. With live data we would update these bounds on a X bases, perhaps quarterly looking at how we defined recency for a rolling 12 month period so that rfm scores are always weighted based on recent customers in that 12 month period and their spending and shopping habits. This is so we have a fair comparison with older customers.
+, RFM_values_r AS
+(
+    SELECT 
+        unique_user,
+        latest_purchase_date_quarter,
+        latest_purchase_date,
+        transaction_count,
+        revenue_total,
+        CASE 
+            WHEN latest_purchase_date_quarter IS NULL THEN 1
+            WHEN latest_purchase_date_quarter = '2022-10-01' THEN 4
+            WHEN latest_purchase_date_quarter = '2022-07-01' THEN 4
+            WHEN latest_purchase_date_quarter = '2022-04-01' THEN 3
+            WHEN latest_purchase_date_quarter = '2022-01-01' THEN 2
+            ELSE 1
+        END AS recency_rank,
+        CASE 
+            WHEN transaction_count IS NULL THEN 1
+            WHEN transaction_count >= 5 THEN 4
+            WHEN transaction_count >= 4 THEN 4
+            WHEN transaction_count >= 3 THEN 3
+            WHEN transaction_count >= 2 THEN 2
+            ELSE 1
+        END AS frequency_rank,
+        CASE 
+            WHEN revenue_total IS NULL THEN 1
+            WHEN revenue_total >= 316.23 THEN 4
+            WHEN revenue_total >= 100 THEN 4
+            WHEN revenue_total >= 31.62 THEN 3
+            WHEN revenue_total >= 10 THEN 2
+            ELSE 1
+        END AS monetary_rank
+    FROM RFM_data_r
+)
+--Same use as above CTE but for unregistered customers. May be possible to combine this into one CTE? look later as this functions for now
+, RFM_values_u AS
+(
+  SELECT 
+        unique_user,
+        latest_purchase_date_quarter,
+        latest_purchase_date,
+        transaction_count,
+        revenue_total,
+        CASE 
+            WHEN latest_purchase_date_quarter IS NULL THEN 1
+            WHEN latest_purchase_date_quarter = '2022-10-01' THEN 4
+            WHEN latest_purchase_date_quarter = '2022-07-01' THEN 4
+            WHEN latest_purchase_date_quarter = '2022-04-01' THEN 3
+            WHEN latest_purchase_date_quarter = '2022-01-01' THEN 2
+            ELSE 1
+        END AS recency_rank,
+        CASE 
+            WHEN transaction_count IS NULL THEN 1
+            WHEN transaction_count >= 5 THEN 4
+            WHEN transaction_count >= 4 THEN 4
+            WHEN transaction_count >= 3 THEN 3
+            WHEN transaction_count >= 2 THEN 2
+            ELSE 1
+        END AS frequency_rank,
+        CASE 
+            WHEN revenue_total IS NULL THEN 1
+            WHEN revenue_total >= 316.23 THEN 4
+            WHEN revenue_total >= 100 THEN 4
+            WHEN revenue_total >= 31.62 THEN 3
+            WHEN revenue_total >= 10 THEN 2
+            ELSE 1
+        END AS monetary_rank
+    FROM RFM_data_u
+)
+--CTE that creates the output table for registered users of RFM score as well as adding necessary fields useful for further analysis in BI tools. 
+, RFM_r AS
+(
+SELECT 
+    unique_user,
+    latest_purchase_date_quarter,
+    RFM_values_r.latest_purchase_date,
+    RFM_values_r.transaction_count,
+    revenue_total,
+    --combines R F and M to make a code
+    CONCAT(recency_rank, frequency_rank, monetary_rank) AS RFM_score,
+    'Registered User' AS User_Group,
+    users.user_crm_id,
+    users.city,
+    users.user_gender,
+    users.registration_date,
+    users.first_purchase_date,
+    users.opt_in_status,
+    users.prism_plus_status,
+    users.prism_plus_tier
+FROM RFM_values_r 
+INNER JOIN prism-2023-c2.Prism_Main.users
+ON RFM_values_r.unique_user = users.user_crm_id 
+)
+--Same use as above CTE but for unregistered users
+, RFM_u AS
+(
+SELECT 
+    unique_user,
+    latest_purchase_date_quarter,
+    latest_purchase_date,
+    transaction_count,
+    revenue_total,
+    CONCAT(recency_rank, frequency_rank, monetary_rank) AS RFM_score,
+    'Unregistered User' AS User_Group,
+    /*for Union purposes as fields to unregistered customer table and CAST changes data types so tehy match as by default NULL is considers INT64. Once again if I can combine RFM_values CTEs into 1 
+     this may be unneeded.*/
+    CAST(NULL AS string) AS user_crm_id,
+    CAST(NULL AS string) AS city,
+    CAST(NULL AS string) AS user_gender,
+    CAST(NULL AS date) AS registration_date,
+    CAST(NULL AS date) AS first_purchase_date,
+    CAST(NULL AS bool) AS opt_in_status,
+    CAST(NULL AS bool)AS prism_plus_status,
+    CAST(NULL AS string) AS prism_plus_tier
+FROM RFM_values_u
+)
+--Combines resultant tables of RFM score for registered customers and non registered customers from the CTE using UNION ALL
+SELECT *
+    FROM RFM_r
+    UNION ALL
+    SELECT *
+    FROM RFM_u
